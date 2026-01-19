@@ -1,0 +1,254 @@
+# src/lstm_gat.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GATConv
+
+
+# ============================================================
+# LSTM Encoder (Dynamic only) - Paper-aligned
+#   Input : (B*N, T, F_dyn)
+#   Output: (B*N, d_lstm)
+#   We take the last timestep hidden state as z_i.
+# ============================================================
+
+class LSTMEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+
+    def forward(self, x_dyn: torch.Tensor) -> torch.Tensor:
+        """
+        x_dyn: (B*N, T, F_dyn)
+        returns z: (B*N, hidden_dim)
+        """
+        out, _ = self.lstm(x_dyn)
+        z = out[:, -1, :]  # last timestep
+        return z
+
+
+# ============================================================
+# Static Encoder - Paper-aligned
+#   s_i (59-dim) -> Linear -> ReLU -> s_tilde_i (d_lstm)
+# ============================================================
+
+class StaticEncoder(nn.Module):
+    def __init__(self, static_input_dim: int, out_dim: int):
+        super().__init__()
+        self.fc = nn.Linear(static_input_dim, out_dim)
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        """
+        s: (B*N, static_dim)
+        returns: (B*N, out_dim)
+        """
+        return F.relu(self.fc(s))
+
+
+# ============================================================
+# Fusion (Paper-aligned)
+#   h_i = Dropout(ReLU(W_c [z_i || s_tilde_i] + b))
+#   where z_i: d_lstm, s_tilde_i: d_lstm, output h_i: d_lstm
+# ============================================================
+
+class FusionLayer(nn.Module):
+    def __init__(self, d_lstm: int, dropout: float):
+        super().__init__()
+        self.proj = nn.Linear(d_lstm * 2, d_lstm)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, z_dyn: torch.Tensor, s_tilde: torch.Tensor) -> torch.Tensor:
+        """
+        z_dyn  : (B*N, d_lstm)
+        s_tilde: (B*N, d_lstm)
+        returns h: (B*N, d_lstm)
+        """
+        h = torch.cat([z_dyn, s_tilde], dim=-1)  # (B*N, 2*d_lstm)
+        h = F.relu(self.proj(h))                # (B*N, d_lstm)
+        h = self.drop(h)
+        return h
+
+
+# ============================================================
+# 2-hop GAT Routing Module
+#   Input : node embeddings (B*N, d_lstm)
+#   Output: routed embeddings (B*N, gnn_hidden_dim)
+#
+# NOTE:
+# - edge_weight is passed as edge_attr with shape [E, 1]
+# ============================================================
+
+class GATRouting2Hop(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        heads: int,
+        dropout: float,
+    ):
+        super().__init__()
+
+        self.gat1 = GATConv(
+            in_channels=in_dim,
+            out_channels=hidden_dim,
+            heads=heads,
+            concat=False,      # keep (N, hidden_dim)
+            dropout=dropout,
+            edge_dim=1,
+        )
+
+        self.gat2 = GATConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            heads=heads,
+            concat=False,
+            dropout=dropout,
+            edge_dim=1,
+        )
+
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor = None) -> torch.Tensor:
+        """
+        x: (B*N, in_dim)
+        edge_index: (2, E_big)
+        edge_weight: (E_big,) or (E_big, 1)
+        """
+        if edge_weight is not None and edge_weight.dim() == 1:
+            edge_weight = edge_weight.view(-1, 1)  # (E,) -> (E,1)
+
+        x = self.gat1(x, edge_index, edge_weight)
+        x = F.relu(x)
+        x = self.drop(x)
+
+        x = self.gat2(x, edge_index, edge_weight)
+        return x
+
+
+# ============================================================
+# Full Model: LSTM (dynamic) + Static Encoder + Fusion + 2-hop GAT
+#   - Output is log-space discharge (to match your Dataset target = log1p(Q))
+# ============================================================
+
+class CombinedLSTMWithStatic2Hop(nn.Module):
+    def __init__(
+        self,
+        dynamic_input_dim: int,
+        static_input_dim: int,
+        lstm_hidden_dim: int,   # d_lstm, paper uses 128
+        gnn_hidden_dim: int,    # paper uses 64
+        output_dim: int,        # 1
+        lstm_layers: int,
+        gat_heads: int,
+        lstm_dropout: float,
+        gnn_dropout: float,
+        cheb_k: int,
+    ):
+        super().__init__()
+
+        # ----- LSTM encoder (dynamic only) -----
+        self.lstm_encoder = LSTMEncoder(
+            input_dim=dynamic_input_dim,
+            hidden_dim=lstm_hidden_dim,
+            num_layers=lstm_layers,
+            dropout=lstm_dropout,
+        )
+
+        # ----- Static encoder (paper-aligned) -----
+        self.static_encoder = StaticEncoder(
+            static_input_dim=static_input_dim,
+            out_dim=lstm_hidden_dim,  # s_tilde in R^{d_lstm}
+        )
+
+        # ----- Fusion (paper-aligned) -----
+        self.fusion = FusionLayer(
+            d_lstm=lstm_hidden_dim,
+            dropout=gnn_dropout,  # paper uses dropout after fusion
+        )
+
+        # ----- GNN routing -----
+        self.gnn = GATRouting2Hop(
+            in_dim=lstm_hidden_dim,      # input is h_i in R^{d_lstm}
+            hidden_dim=gnn_hidden_dim,
+            heads=gat_heads,
+            dropout=gnn_dropout,
+        )
+
+        # ----- Output head -----
+        self.out = nn.Linear(gnn_hidden_dim, output_dim)
+
+    def forward(
+        self,
+        dynamic_features: torch.Tensor,  # (B, T, N, F_dyn)
+        static_features: torch.Tensor,   # (B, N, F_static)
+        edge_index: torch.Tensor,        # (2, E)
+        edge_weight: torch.Tensor = None # (E,)
+    ) -> torch.Tensor:
+        """
+        returns pred: (B, N) in log-space (compatible with your Dataset target log1p(Q))
+        """
+        B, T, N, F_dyn = dynamic_features.shape
+
+        # --------------------------------------------------------
+        # reshape to (B*N, T, F_dyn) and (B*N, F_static)
+        # --------------------------------------------------------
+        dyn = dynamic_features.permute(0, 2, 1, 3).reshape(B * N, T, F_dyn)
+        sta = static_features.reshape(B * N, -1)
+
+        # --------------------------------------------------------
+        # encoders
+        # --------------------------------------------------------
+        z_dyn = self.lstm_encoder(dyn)         # (B*N, d_lstm)
+        s_tilde = self.static_encoder(sta)     # (B*N, d_lstm)
+
+        # --------------------------------------------------------
+        # fusion (paper)
+        # --------------------------------------------------------
+        node_embed = self.fusion(z_dyn, s_tilde)  # (B*N, d_lstm)
+
+        # --------------------------------------------------------
+        # Build "big graph" for batched message passing
+        # edge_index: (2, E)  -> (2, B*E) with node offsets
+        # edge_weight: (E,)   -> (B*E,)
+        # --------------------------------------------------------
+        device = node_embed.device
+
+        edge_index_big = []
+        edge_weight_big = []
+
+        for b in range(B):
+            offset = b * N
+            edge_index_big.append(edge_index + offset)
+            if edge_weight is not None:
+                edge_weight_big.append(edge_weight)
+
+        edge_index_big = torch.cat(edge_index_big, dim=1).to(device)
+        if edge_weight is not None:
+            edge_weight_big = torch.cat(edge_weight_big, dim=0).to(device)
+        else:
+            edge_weight_big = None
+
+        # --------------------------------------------------------
+        # GNN routing
+        # --------------------------------------------------------
+        gnn_embed = self.gnn(node_embed, edge_index_big, edge_weight_big)  # (B*N, gnn_hidden)
+
+        # --------------------------------------------------------
+        # output
+        # --------------------------------------------------------
+        pred = self.out(gnn_embed).view(B, N)  # (B, N)
+        return pred

@@ -1,0 +1,41 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ===== Virtual env =====
+.venv/
+.python-version
+
+# ===== Data =====
+checkpoints/analysis/
+checkpoints/history_ckpt/
+checkpoints/logs
+
+
+# ===== Analysis outputs =====
+*.png
+*.jpg
+*.pdf
+basin_filter_results/
+basin_filter_results_all/
+basin_filter_results_all_parallel/
+
+# ===== Logs =====
+*.log
+
+# ===== OS =====
+.DS_Store
+# ===== Raw hydrology data (DO NOT COMMIT) =====
+dataset/D_gauges/
+dataset/222.csv
+dataset/B_basins_diff_upstrm_all
+dataset/**/gaps/
+dataset/**/shapefiles/
+dataset/**/*.csv
+dataset/**/*.shp
+dataset/**/*.shx
+dataset/**/*.dbf
+dataset/**/*.prj
+dataset/**/*.qpj
+dataset/**/*.qml

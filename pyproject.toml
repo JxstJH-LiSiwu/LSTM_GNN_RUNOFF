@@ -1,0 +1,26 @@
+[project]
+name = "1-gnn-lstm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "geopandas>=1.1.2",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.0",
+    "pandas>=2.3.3",
+    "plot>=0.6.5",
+    "pyproj>=3.7.2",
+    "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.16.3",
+    "shapely>=2.1.2",
+    "torch>=2.9.1",
+    "torch-geometric>=2.7.0",
+    "torchaudio>=2.9.1",
+    "torchvision>=0.24.1",
+    "tqdm>=4.67.1",
+]
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
