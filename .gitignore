@@ -11,6 +11,9 @@ __pycache__/
 checkpoints/analysis/
 checkpoints/history_ckpt/
 checkpoints/logs
+*.pt  
+*.pth 
+
 
 
 # ===== Analysis outputs =====
