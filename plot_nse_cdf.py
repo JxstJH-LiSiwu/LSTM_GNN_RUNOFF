@@ -15,6 +15,10 @@ from src.metrics import compute_nse_per_basin
 from src.lstm_only import CombinedLSTMWithStatic2Hop as LSTMOnly
 from src.lstm_gat  import CombinedLSTMWithStatic2Hop as LSTMGAT
 from src.lstm_gcn  import CombinedLSTMWithStatic2Hop as LSTMGCN
+from src.lstm_cheb import CombinedLSTMWithStatic2Hop as LSTMCheb
+from src.lstm_sage import CombinedLSTMWithStatic2Hop as LSTMSage
+
+
 
 
 # ============================================================
@@ -39,6 +43,18 @@ MODEL_REGISTRY = {
         "color": "#1f77b4",
         "linestyle": "-.",
     },
+    "LSTM-Cheb": {
+        "class": LSTMCheb,
+        "ckpt": "lstm_cheb_model_epoch.pth",
+        "color": "#2ca02c",
+        "linestyle": "-",
+    },
+    "LSTM-SAGE": {
+        "class": LSTMSage,
+        "ckpt": "lstm_sage_model_epoch.pth",
+        "color": "#ff7f0e",
+        "linestyle": ":",
+    },
 }
 
 # 👉 控制哪些模型参与画图（Figure 4 / 5）
@@ -46,6 +62,8 @@ PLOT_MODELS = [
     "LSTM",
     "LSTM-GAT",
     "LSTM-GCN",
+    "LSTM-Cheb",
+    "LSTM-SAGE",
 ]
 
 
@@ -123,7 +141,7 @@ def plot_figure4_nse_cdf(nse_dict_all, save_path):
 # ============================================================
 # Figure 5 — Scatter plots (select one model)
 # ============================================================
-def plot_figure5_scatter(obs_q, pred_q, mask, model_name, out_dir):
+def plot_figure5_scatter(obs_q, pred_q, mask, model_name, out_dir, plot_loglog=True):
     """
     obs_q, pred_q : (T, N)
     mask          : (T, N) boolean
@@ -157,25 +175,64 @@ def plot_figure5_scatter(obs_q, pred_q, mask, model_name, out_dir):
     plt.savefig(out_dir / f"figure5_scatter_linear_{model_name}.png", dpi=300)
     plt.close()
 
-    # ======================================================
-    # Figure 5b: log–log scale
-    #   (filter positives on 1D arrays)
-    # ======================================================
-    pos = (x > 0) & (y > 0)
-    lx = np.log1p(x[pos])
-    ly = np.log1p(y[pos])
+    if plot_loglog:
+        # ======================================================
+        # Figure 5b: log–log scale
+        #   (filter positives on 1D arrays)
+        # ======================================================
+        pos = (x > 0) & (y > 0)
+        lx = np.log1p(x[pos])
+        ly = np.log1p(y[pos])
 
-    maxv = np.nanpercentile(lx, 99.9)
+        maxv = np.nanpercentile(lx, 99.9)
 
+        plt.figure(figsize=(6, 6))
+        plt.scatter(lx, ly, s=6, alpha=0.25)
+        plt.plot([0, maxv], [0, maxv], "k--", linewidth=1.4)
+        plt.xlabel("log1p(Observed Streamflow)")
+        plt.ylabel("log1p(Predicted Streamflow)")
+        plt.title(f"{model_name} (log–log)")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(out_dir / f"figure5_scatter_loglog_{model_name}.png", dpi=300)
+        plt.close()
+
+
+def plot_figure5a_multi_scatter(predictions, out_dir):
     plt.figure(figsize=(6, 6))
-    plt.scatter(lx, ly, s=6, alpha=0.25)
+    maxv = 0.0
+
+    for name in PLOT_MODELS:
+        obs_q, pred_q, mask = predictions[name]
+        valid = (
+            mask
+            & np.isfinite(obs_q)
+            & np.isfinite(pred_q)
+        )
+
+        x = obs_q[valid].astype(np.float64)
+        y = pred_q[valid].astype(np.float64)
+
+        if x.size == 0:
+            continue
+
+        maxv = max(maxv, np.nanpercentile(x, 99.9))
+        plt.scatter(
+            x,
+            y,
+            s=6,
+            alpha=0.2,
+            label=name,
+            color=MODEL_REGISTRY[name]["color"],
+        )
+
     plt.plot([0, maxv], [0, maxv], "k--", linewidth=1.4)
-    plt.xlabel("log1p(Observed Streamflow)")
-    plt.ylabel("log1p(Predicted Streamflow)")
-    plt.title(f"{model_name} (log–log)")
+    plt.xlabel("Observed Streamflow (m³/s)")
+    plt.ylabel("Predicted Streamflow (m³/s)")
     plt.grid(alpha=0.3)
+    plt.legend(frameon=False)
     plt.tight_layout()
-    plt.savefig(out_dir / f"figure5_scatter_loglog_{model_name}.png", dpi=300)
+    plt.savefig(out_dir / "figure5_scatter_linear_multi_model.png", dpi=300)
     plt.close()
 
 
@@ -205,6 +262,7 @@ def main():
     static_df  = cache["static_df"]
     edge_index = cache["edge_index"]
     edge_weight = cache["edge_weight"]
+    edge_weight_raw = cache.get("edge_weight_raw", edge_weight)
     split = cache["split"]
 
     basin_ids = list(static_df.index)
@@ -233,8 +291,11 @@ def main():
     nse_dict_all = {}
     predictions = {}
 
+    raw_edge_models = {"LSTM-GAT", "LSTM-GCN", "LSTM-Cheb"}
+
     for name in PLOT_MODELS:
         cfg = MODEL_REGISTRY[name]
+        edge_weight_use = edge_weight_raw if name in raw_edge_models else edge_weight
 
         print(f"\n[Eval] {name}")
         model = cfg["class"](
@@ -247,14 +308,14 @@ def main():
             gat_heads=4,
             lstm_dropout=0.35,
             gnn_dropout=0.2,
-            cheb_k = 0.3
+            cheb_k=3
         ).to(device)
 
         ckpt_path = SAVE_DIR / cfg["ckpt"]
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
         obs_log, pred_log, mask = predict_on_loader(
-            model, test_loader, edge_index, edge_weight, device
+            model, test_loader, edge_index, edge_weight_use, device
         )
 
         obs_q  = positive_robust_log_per_basin_inverse(obs_log, runoff_median)
@@ -278,12 +339,7 @@ def main():
     # ========================================================
     # Figure 5 (pick best model, e.g. LSTM-GAT)
     # ========================================================
-    obs_q, pred_q, mask = predictions["LSTM-GAT"]
-    plot_figure5_scatter(
-        obs_q, pred_q, mask,
-        model_name="LSTM-GAT",
-        out_dir=OUT_DIR,
-    )
+    plot_figure5a_multi_scatter(predictions, out_dir=OUT_DIR)
 
 
 if __name__ == "__main__":

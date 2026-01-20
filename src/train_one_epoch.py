@@ -47,6 +47,9 @@ def train_one_epoch(
     use_amp: bool = True,
     accum_steps: int = 1,
     eps: float = 1e-8,
+    peak_weighting: bool = False,
+    peak_weight: float = 4.0,
+    peak_top_pct: float = 0.025,
 
     # ---------------- DEBUG switches ----------------
     debug: bool = False,
@@ -55,7 +58,7 @@ def train_one_epoch(
     debug_check_grad_every: int = 200 # check grad/param update frequency
 ):
     """
-    Paper-aligned training loss (NO q_weight, NO peak weighting):
+    Paper-aligned training loss (optional peak weighting):
 
         loss = mean( (pred - target)^2 over valid (mask==True) entries )
 
@@ -139,7 +142,14 @@ def train_one_epoch(
 
             diff2 = (pred - target) ** 2
             diff2_valid = diff2[mask]
-            loss = diff2_valid.mean()
+            if peak_weighting and diff2_valid.numel() > 0:
+                valid_target = target[mask]
+                q = torch.quantile(valid_target, 1.0 - peak_top_pct)
+                weight = torch.ones_like(target)
+                weight = torch.where(mask & (target >= q), weight.new_tensor(peak_weight), weight)
+                loss = (diff2 * weight)[mask].sum() / weight[mask].sum().clamp_min(eps)
+            else:
+                loss = diff2_valid.mean()
 
         # ---------------- debug prints ----------------
         # Use "effective batch id" = valid_batches+1 (because valid_batches increments below)

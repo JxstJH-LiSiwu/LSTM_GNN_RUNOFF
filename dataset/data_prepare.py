@@ -106,6 +106,7 @@ def build_edge_index_and_weight_from_stream_dist(
     stream_dist_csv: str,
     basin_ids: list[str],
     eps: float = 1e-6,
+    normalize: bool =True,
 ):
     df = pd.read_csv(stream_dist_csv, sep=";")
 
@@ -154,18 +155,21 @@ def build_edge_index_and_weight_from_stream_dist(
     edge_weight_raw = torch.tensor(w_raw, dtype=torch.float32)
 
     if edge_weight_raw.numel() == 0:
-        return edge_index, edge_weight_raw
+        return edge_index, edge_weight_raw, edge_weight_raw
 
-    # per-downstream normalize incoming sum to 1
-    num_nodes = len(basin_ids)
-    sum_in = torch.zeros(num_nodes, dtype=torch.float32)
-    sum_in.scatter_add_(0, edge_index[1], edge_weight_raw)
+    if normalize:
+        # per-downstream normalize incoming sum to 1
+        num_nodes = len(basin_ids)
+        sum_in = torch.zeros(num_nodes, dtype=torch.float32)
+        sum_in.scatter_add_(0, edge_index[1], edge_weight_raw)
 
-    denom = sum_in[edge_index[1]].clamp_min(eps)
-    edge_weight = edge_weight_raw / denom
-    edge_weight = torch.where(torch.isfinite(edge_weight), edge_weight, torch.zeros_like(edge_weight))
+        denom = sum_in[edge_index[1]].clamp_min(eps)
+        edge_weight = edge_weight_raw / denom
+        edge_weight = torch.where(torch.isfinite(edge_weight), edge_weight, torch.zeros_like(edge_weight))
+    else:
+        edge_weight = edge_weight_raw
 
-    return edge_index, edge_weight
+    return edge_index, edge_weight, edge_weight_raw
 
 # ============================================================
 # 3. Time split (70/15/15) - done in data_prepare.py
@@ -257,7 +261,7 @@ def load_lamah_daily(root: str):
 
     # ---------- graph ----------
     stream_csv = root / "B_basins_diff_upstrm_all/1_attributes/Stream_dist.csv"
-    edge_index, edge_weight = build_edge_index_and_weight_from_stream_dist(
+    edge_index, edge_weight, edge_weight_raw = build_edge_index_and_weight_from_stream_dist(
         str(stream_csv), basin_ids
     )
 
@@ -269,6 +273,7 @@ def load_lamah_daily(root: str):
         static_df,
         edge_index,
         edge_weight,
+        edge_weight_raw
     )
 
 # ============================================================
@@ -301,6 +306,7 @@ def prepare_and_save_lamah_daily(
         static_raw,
         edge_index,
         edge_weight,
+        edge_weight_raw
     ) = load_lamah_daily(root)
 
     basin_ids = list(static_raw.index)
@@ -375,6 +381,7 @@ def prepare_and_save_lamah_daily(
     print("\n---------- Graph ----------")
     print(f"edge_index shape : {edge_index.shape}  (2, E)")
     print(f"edge_weight shape: {edge_weight.shape}  (E,)")
+    print(f"edge_weight_raw shape: {edge_weight_raw.shape}  (E,)")  
     print("========================================================\n")
 
     cache = {
@@ -385,6 +392,7 @@ def prepare_and_save_lamah_daily(
         "static_df": static_df,
         "edge_index": edge_index,
         "edge_weight": edge_weight,
+        "edge_weight_raw": edge_weight_raw,
         "split": split,
         "meta": {
             "root": str(root),
