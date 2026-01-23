@@ -47,17 +47,29 @@ class FusionLayer(nn.Module):
 # ============================================================
 
 class GraphSAGERouting2Hop(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, dropout: float):
+    def __init__(self, in_dim: int, hidden_dim: int, dropout: float, num_hops: int = 2):
         super().__init__()
-        self.sage1 = SAGEConv(in_dim, hidden_dim)
-        self.sage2 = SAGEConv(hidden_dim, hidden_dim)
+        self.num_hops = num_hops
+
+        # MODIFIED: multi-hop routing with residual + layernorm
+        self.convs = nn.ModuleList()
+        for hop in range(num_hops):
+            in_channels = in_dim if hop == 0 else hidden_dim
+            self.convs.append(SAGEConv(in_channels, hidden_dim))
+
+        self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(num_hops)])
         self.drop = nn.Dropout(dropout)
+        self.res_proj = nn.Linear(in_dim, hidden_dim) if in_dim != hidden_dim else None
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor = None) -> torch.Tensor:
-        x = self.sage1(x, edge_index)
-        x = F.relu(x)
-        x = self.drop(x)
-        x = self.sage2(x, edge_index)
+        for hop, conv in enumerate(self.convs):
+            delta = conv(x, edge_index)
+            if hop != self.num_hops - 1:
+                delta = F.relu(delta)
+                delta = self.drop(delta)
+            base = self.res_proj(x) if (hop == 0 and self.res_proj is not None) else x
+            x = base + delta
+            x = self.norms[hop](x)
         return x
 
 
@@ -74,6 +86,7 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
         lstm_dropout: float,
         gnn_dropout: float,
         cheb_k: int = 3,    # unused, kept for API compatibility
+        num_hops: int = 2,
     ):
         super().__init__()
 
@@ -81,7 +94,12 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
         self.static_encoder = StaticEncoder(static_input_dim, lstm_hidden_dim)
         self.fusion = FusionLayer(lstm_hidden_dim, gnn_dropout)
 
-        self.gnn = GraphSAGERouting2Hop(lstm_hidden_dim, gnn_hidden_dim, gnn_dropout)
+        self.gnn = GraphSAGERouting2Hop(
+            lstm_hidden_dim,
+            gnn_hidden_dim,
+            gnn_dropout,
+            num_hops=num_hops,  # MODIFIED: multi-hop routing with residual + layernorm
+        )
         self.out = nn.Linear(gnn_hidden_dim, output_dim)
 
     def forward(

@@ -1,8 +1,10 @@
+from pathlib import Path
 from data_prepare import load_lamah_daily
 
-DATA_ROOT = "/home/lisiwu/jxwork/1-gnn-lstm/dataset"
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_ROOT = BASE_DIR / "dataset"
 
-precip_df, temp_df, soil_df, runoff_df, static_df = load_lamah_daily(DATA_ROOT)
+precip_df, temp_df, soil_df, runoff_df, static_df = load_lamah_daily(str(DATA_ROOT))
 
 print("precip:", precip_df.shape)
 print("temp:  ", temp_df.shape)

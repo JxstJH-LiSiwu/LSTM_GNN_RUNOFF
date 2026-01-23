@@ -1,12 +1,14 @@
 # dataset/preprocess_lamah.py
 import torch
+from pathlib import Path
 from data_prepare import load_lamah_daily
 
-DATA_ROOT = "/home/lisiwu/jxwork/1-gnn-lstm/dataset"
-OUT_PATH = "/home/lisiwu/jxwork/1-gnn-lstm/dataset/lamah_cache.pt"
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_ROOT = BASE_DIR / "dataset"
+OUT_PATH = DATA_ROOT / "lamah_cache.pt"
 
 print("📦 Loading raw LamaH data (this is slow, only once)...")
-precip_df, temp_df, soil_df, runoff_df, static_df = load_lamah_daily(DATA_ROOT)
+precip_df, temp_df, soil_df, runoff_df, static_df = load_lamah_daily(str(DATA_ROOT))
 
 cache = {
     "precip": precip_df.values.astype("float32"),

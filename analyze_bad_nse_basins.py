@@ -103,8 +103,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ===== paths (match your project) =====
-    DATA_ROOT = Path("/home/lisiwu/jxwork/1-gnn-lstm/dataset")
-    SAVE_DIR  = Path("/home/lisiwu/jxwork/1-gnn-lstm/checkpoints")
+    base_dir = Path(__file__).resolve().parent
+    DATA_ROOT = base_dir / "dataset"
+    SAVE_DIR  = base_dir / "checkpoints"
     CACHE_FILE = SAVE_DIR / "data_cache" / "lamah_daily.pt"
     CKPT_PATH  = SAVE_DIR / "lstm_gat_model_epoch.pth"
 

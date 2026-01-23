@@ -243,7 +243,8 @@ def plot_figure5a_multi_scatter(predictions, out_dir):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    SAVE_DIR   = Path("/home/lisiwu/jxwork/1-gnn-lstm/checkpoints")
+    base_dir = Path(__file__).resolve().parent
+    SAVE_DIR   = base_dir / "checkpoints"
     CACHE_FILE = SAVE_DIR / "data_cache" / "lamah_daily.pt"
     OUT_DIR    = SAVE_DIR / "analysis"
     OUT_DIR.mkdir(parents=True, exist_ok=True)

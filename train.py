@@ -1,10 +1,13 @@
 # train.py
 from pathlib import Path
-import torch
-import time
 import logging
+import os
+import time
 from datetime import datetime, timedelta
+import argparse
+
 import numpy as np
+import torch
 
 from dataset.data_prepare import (
     prepare_and_save_lamah_daily,
@@ -21,17 +24,21 @@ from src import MODEL_REGISTRY
 # 全局配置（Paper-aligned）
 # ============================================================
 
-DATA_ROOT = Path("/home/lisiwu/jxwork/1-gnn-lstm/dataset")
-SAVE_DIR = Path("/home/lisiwu/jxwork/1-gnn-lstm/checkpoints")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_ROOT = BASE_DIR / "dataset"
+SAVE_DIR = BASE_DIR / "checkpoints"
 
 USE_CACHE = True
 CACHE_DIR = SAVE_DIR / "data_cache"
 CACHE_FILE = CACHE_DIR / "lamah_daily.pt"
-INIT_FROM_RAW = True
+INIT_FROM_RAW = False
+
+# NOTE: 不再在 train.py 内部做多 GPU 调度；外部用 CUDA_VISIBLE_DEVICES 控制
+NUM_GPUS = int(os.getenv("NUM_GPUS", "1"))  # 保留兼容，但不再用于 Pool
 
 TRAIN_MODE = 0
 RESUME_EPOCH = 0
-MAX_EPOCH = 100
+MAX_EPOCH = 65
 MODEL_LIST = ["LSTM", "LSTM-GAT", "LSTM-GCN", "LSTM-Cheb", "LSTM-GraphSAGE"]
 
 # FOR PAPER
@@ -43,10 +50,11 @@ LSTM_DROPOUT = 0.35
 GNN_DROPOUT = 0.2
 OUTPUT_DIM = 1
 CHEBK = 3  # defult = 3 if use LSTM_CheNet
+NUM_HOPS = int(os.getenv("HOP", "2"))  # MODIFIED: multi-hop routing with residual + layernorm
 
 USE_AMP = True
 
-BASE_BATCH_SIZE = 4
+BASE_BATCH_SIZE = 12
 ACCUM_STEPS = 2
 
 LEARNING_RATE = 5e-4
@@ -59,13 +67,18 @@ VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 SPLIT_SEED = 42
 
-AUTO_PLOT = True
+AUTO_PLOT = False  # 仍保留，但默认不在每个模型进程里画（见 PLOT_AFTER_TRAIN）
 
 PEAK_WEIGHTING = True
 PEAK_TOP_PCT = 0.025
 PEAK_WEIGHT = 4.0
 
 RAW_EDGE_MODELS = {"LSTM-GAT", "LSTM-GCN", "LSTM-Cheb"}
+MEAN_LOSS_WEIGHT = float(os.getenv("MEAN_LOSS_WEIGHT", "0.0"))
+RUN_TAG = os.getenv("RUN_TAG", "").strip()
+
+# DataLoader workers：单进程下可安全开多 worker（40 核机器建议每进程 6~10）
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "5"))
 
 
 # ============================================================
@@ -95,103 +108,64 @@ program_start_time = time.time()
 # 数据加载（data_prepare.py 已完成：读取+切分+变换+缩放+缓存）
 # ============================================================
 
-if INIT_FROM_RAW or (USE_CACHE and not CACHE_FILE.exists()):
-    logger.info("🔄 从原始 CSV 构建数据并缓存（含切分+变换+缩放）")
-    cache = prepare_and_save_lamah_daily(
-        str(DATA_ROOT),
-        CACHE_FILE,
-        seq_len=SEQ_LEN,
-        train_ratio=TRAIN_RATIO,
-        val_ratio=VAL_RATIO,
-        test_ratio=TEST_RATIO,
-        seed=SPLIT_SEED,
-        overwrite=INIT_FROM_RAW,
+def load_data():
+    if INIT_FROM_RAW or (USE_CACHE and not CACHE_FILE.exists()):
+        logger.info("🔄 从原始 CSV 构建数据并缓存（含切分+变换+缩放）")
+        cache = prepare_and_save_lamah_daily(
+            str(DATA_ROOT),
+            CACHE_FILE,
+            seq_len=SEQ_LEN,
+            train_ratio=TRAIN_RATIO,
+            val_ratio=VAL_RATIO,
+            test_ratio=TEST_RATIO,
+            seed=SPLIT_SEED,
+            overwrite=INIT_FROM_RAW,
+        )
+    elif USE_CACHE:
+        logger.info("⚡ 从缓存加载数据")
+        cache = load_lamah_from_cache(CACHE_FILE)
+    else:
+        raise RuntimeError("现在要求所有读取/处理都在 data_prepare.py 完成，请使用 cache 流程。")
+
+    precip_df = cache["precip_df"]
+    temp_df = cache["temp_df"]
+    soil_df = cache["soil_df"]
+    runoff_df = cache["runoff_df"]  # transformed target (per-basin robust log)
+    static_df = cache["static_df"]
+    edge_index = cache["edge_index"]
+    edge_weight = cache["edge_weight"]
+    edge_weight_raw = cache.get("edge_weight_raw", None)
+    split = cache["split"]
+
+    basin_ids = list(static_df.index)
+
+    if edge_weight_raw is None:
+        edge_weight_raw = edge_weight
+
+    runoff_median_series = cache["meta"]["scalers"]["runoff"]["median_per_basin"]
+    runoff_median_per_basin = runoff_median_series.loc[basin_ids].to_numpy(dtype=np.float64)
+
+    train_indices = split["train"]
+    val_indices = split["val"]
+    test_indices = split["test"]
+
+    logger.info(f"[Split] train/val/test = {len(train_indices)}/{len(val_indices)}/{len(test_indices)}")
+
+    return (
+        precip_df,
+        temp_df,
+        soil_df,
+        runoff_df,
+        static_df,
+        edge_index,
+        edge_weight,
+        edge_weight_raw,
+        basin_ids,
+        runoff_median_per_basin,
+        train_indices,
+        val_indices,
+        test_indices,
     )
-elif USE_CACHE:
-    logger.info("⚡ 从缓存加载数据")
-    cache = load_lamah_from_cache(CACHE_FILE)
-else:
-    raise RuntimeError("现在要求所有读取/处理都在 data_prepare.py 完成，请使用 cache 流程。")
-
-precip_df = cache["precip_df"]
-temp_df = cache["temp_df"]
-soil_df = cache["soil_df"]
-runoff_df = cache["runoff_df"]  # transformed target (per-basin robust log)
-static_df = cache["static_df"]
-edge_index = cache["edge_index"]
-edge_weight = cache["edge_weight"]
-edge_weight_raw = cache.get("edge_weight_raw", None)
-split = cache["split"]
-
-basin_ids = list(static_df.index)
-
-if edge_weight_raw is None:
-    edge_weight_raw = edge_weight
-
-# per-basin medians for inverse (runoff)
-runoff_median_series = cache["meta"]["scalers"]["runoff"]["median_per_basin"]
-# ensure order aligned to basin_ids
-runoff_median_per_basin = runoff_median_series.loc[basin_ids].to_numpy(dtype=np.float64)
-
-train_indices = split["train"]
-val_indices = split["val"]
-test_indices = split["test"]
-
-logger.info(f"[Split] train/val/test = {len(train_indices)}/{len(val_indices)}/{len(test_indices)}")
-
-
-# ============================================================
-# Dataset / DataLoader
-# ============================================================
-
-train_dataset = LamaHDataset(
-    precip_df, temp_df, soil_df, runoff_df, static_df,
-    seq_len=SEQ_LEN,
-    indices=train_indices,
-    sample_weights=None,
-)
-
-val_dataset = LamaHDataset(
-    precip_df, temp_df, soil_df, runoff_df, static_df,
-    seq_len=SEQ_LEN,
-    indices=val_indices,
-    sample_weights=None,
-)
-
-train_loader = create_dataloader(
-    train_dataset,
-    batch_size=BASE_BATCH_SIZE,
-    shuffle=True,
-    num_workers=4,
-)
-
-val_loader = create_dataloader(
-    val_dataset,
-    batch_size=2,  # keep small for 6GB
-    shuffle=False,
-    num_workers=4,
-)
-
-
-test_dataset = LamaHDataset(
-    precip_df, temp_df, soil_df, runoff_df, static_df,
-    seq_len=SEQ_LEN,
-    indices=test_indices,
-    sample_weights=None,
-)
-test_loader = create_dataloader(
-    test_dataset,
-    batch_size=2,
-    shuffle=False,
-    num_workers=4,
-)
-
-
-# ============================================================
-# 模型
-# ============================================================
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def select_edge_weight(model_name, edge_weight_norm, edge_weight_raw):
@@ -274,7 +248,6 @@ def evaluate(model, dataloader, edge_index, edge_weight, device, basin_ids, runo
         if bad.any():
             logger.info(f"[EvalDebug] bad diff2 count = {bad.sum()}")
 
-        # 🔒 CRITICAL: drop non-finite diff2 explicitly
         valid = mask & np.isfinite(diff2)
 
         mse_num += diff2[valid].sum()
@@ -335,19 +308,73 @@ def evaluate(model, dataloader, edge_index, edge_weight, device, basin_ids, runo
 
 
 # ============================================================
-# 训练循环
+# 训练循环：单模型训练函数
 # ============================================================
 
-for model_name in MODEL_LIST:
+def train_single_model(model_name, device_id=0, gpu_index=0):
+    """在当前进程（单GPU）上训练单个模型。
+
+    外部用 CUDA_VISIBLE_DEVICES 控制 GPU 绑定；进程内默认使用 cuda:0。
+    """
+    # 设备
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+
+    # 为每个进程/模型创建独立日志
+    model_log_dir = LOG_DIR / f"gpu{gpu_index}"
+    model_log_dir.mkdir(exist_ok=True)
+    model_run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # 日志文件名加入 model + RUN_TAG + timestamp，避免并发冲突
+    tag_part = f"_{RUN_TAG}" if RUN_TAG else ""
+    model_log_path = model_log_dir / f"{model_name}{tag_part}_{model_run_time}.log"
+
+    model_logger = logging.getLogger(f"gpu{gpu_index}_{model_name}_{tag_part}_{model_run_time}")
+    model_logger.setLevel(logging.INFO)
+    model_logger.handlers = []
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    file_handler = logging.FileHandler(model_log_path)
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    model_logger.addHandler(file_handler)
+    model_logger.addHandler(console_handler)
+
+    model_logger.info(f"Starting training {model_name} on {device} | MEAN_LOSS_WEIGHT={MEAN_LOSS_WEIGHT} | RUN_TAG={RUN_TAG}")
+    model_logger.info(f"DataLoader NUM_WORKERS={NUM_WORKERS}")
+
+    # 载入数据（每进程一次；最小侵入不做共享内存优化）
+    (
+        precip_df,
+        temp_df,
+        soil_df,
+        runoff_df,
+        static_df,
+        edge_index,
+        edge_weight,
+        edge_weight_raw,
+        basin_ids,
+        runoff_median_per_basin,
+        train_indices,
+        val_indices,
+        test_indices,
+    ) = load_data()
+
     if model_name not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model name: {model_name}")
 
     cfg = MODEL_REGISTRY[model_name]
     ckpt_path = SAVE_DIR / cfg["ckpt"]
+    if RUN_TAG:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_{RUN_TAG}{ckpt_path.suffix}")
+
     edge_weight_use = select_edge_weight(model_name, edge_weight, edge_weight_raw)
 
-    logger.info(f"\n===== [Model] {model_name} =====")
-
+    # 创建模型
     model = cfg["class"](
         dynamic_input_dim=3,
         static_input_dim=static_df.shape[1],
@@ -359,30 +386,68 @@ for model_name in MODEL_LIST:
         lstm_dropout=LSTM_DROPOUT,
         gnn_dropout=GNN_DROPOUT,
         cheb_k=CHEBK,
+        num_hops=NUM_HOPS,  # MODIFIED: multi-hop routing with residual + layernorm
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=LR_PATIENCE,
-        min_lr=MIN_LR,
+        optimizer, mode="min", factor=0.5, patience=LR_PATIENCE, min_lr=MIN_LR,
     )
 
     start_epoch = 1
     if TRAIN_MODE == 1 and ckpt_path.exists():
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         start_epoch = RESUME_EPOCH + 1
-        logger.info(f"🔁 从 epoch {RESUME_EPOCH} 恢复训练")
+        model_logger.info(f"🔁 从 epoch {RESUME_EPOCH} 恢复训练")
     else:
-        logger.info("🆕 从头开始训练")
+        model_logger.info("🆕 从头开始训练")
 
     best_val = float("inf")
 
+    train_dataset = LamaHDataset(
+        precip_df, temp_df, soil_df, runoff_df, static_df,
+        seq_len=SEQ_LEN,
+        indices=train_indices,
+        sample_weights=None,
+    )
+    val_dataset = LamaHDataset(
+        precip_df, temp_df, soil_df, runoff_df, static_df,
+        seq_len=SEQ_LEN,
+        indices=val_indices,
+        sample_weights=None,
+    )
+    test_dataset = LamaHDataset(
+        precip_df, temp_df, soil_df, runoff_df, static_df,
+        seq_len=SEQ_LEN,
+        indices=test_indices,
+        sample_weights=None,
+    )
+
+    # val/test loader：同样开 worker（注意：评估里主要在 CPU 做 inverse + NSE，开 worker 能提速）
+    val_loader = create_dataloader(
+        val_dataset,
+        batch_size=2,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+    )
+    test_loader = create_dataloader(
+        test_dataset,
+        batch_size=2,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+    )
+
+    # 训练循环
     for epoch in range(start_epoch, MAX_EPOCH + 1):
-        logger.info(f"Epoch {epoch:03d} started")
+        model_logger.info(f"Epoch {epoch:03d} started")
         t0 = time.time()
+
+        train_loader = create_dataloader(
+            train_dataset,
+            batch_size=BASE_BATCH_SIZE,
+            shuffle=True,
+            num_workers=NUM_WORKERS,
+        )
 
         train_loss = train_one_epoch(
             model=model,
@@ -396,22 +461,17 @@ for model_name in MODEL_LIST:
             peak_weighting=PEAK_WEIGHTING,
             peak_top_pct=PEAK_TOP_PCT,
             peak_weight=PEAK_WEIGHT,
+            mean_loss_weight=MEAN_LOSS_WEIGHT,
         )
 
         val_mse, val_nse_dict, val_stats = evaluate(
-            model,
-            val_loader,
-            edge_index,
-            edge_weight_use,
-            device,
-            basin_ids,
-            runoff_median_per_basin,
-            min_valid=30,
+            model, val_loader, edge_index, edge_weight_use, device, basin_ids,
+            runoff_median_per_basin, min_valid=30,
         )
 
         scheduler.step(val_mse)
 
-        logger.info(
+        model_logger.info(
             f"Epoch {epoch:03d} | "
             f"train_loss={train_loss:.4f} | "
             f"val_MSE(Q)={val_mse:.4f} | "
@@ -429,27 +489,25 @@ for model_name in MODEL_LIST:
         if val_mse < best_val:
             best_val = val_mse
             torch.save(model.state_dict(), ckpt_path)
-            logger.info(f"[BEST] val_MSE(Q)={best_val:.4f} -> saved {ckpt_path.name}")
+            model_logger.info(f"[BEST] val_MSE(Q)={best_val:.4f} -> saved {ckpt_path.name}")
 
+    # 测试阶段
     test_mse, test_nse_dict, test_stats = evaluate(
-        model,
-        test_loader,
-        edge_index,
-        edge_weight_use,
-        device,
-        basin_ids,
-        runoff_median_per_basin,
-        min_valid=30,
+        model, test_loader, edge_index, edge_weight_use, device, basin_ids,
+        runoff_median_per_basin, min_valid=30,
     )
-
-    logger.info(
+    model_logger.info(
         f"[TEST] MSE(Q)={test_mse:.4f} | "
         f"NSE mean={test_stats['mean']:.3f} | "
         f"median={test_stats['median']:.3f} | "
         f"valid_basins={test_stats['num_valid_basins']}"
     )
 
-    metrics_path = SAVE_DIR / f"test_metrics_{model_name.replace('-', '_')}.pt"
+    # 保存测试指标
+    metrics_name = f"test_metrics_{model_name.replace('-', '_')}"
+    if RUN_TAG:
+        metrics_name = f"{metrics_name}_{RUN_TAG}"
+    metrics_path = SAVE_DIR / f"{metrics_name}.pt"
     torch.save(
         {
             "test_nse_per_basin": test_nse_dict,
@@ -458,12 +516,56 @@ for model_name in MODEL_LIST:
         },
         metrics_path,
     )
+    model_logger.info(f"Saved test metrics to {metrics_path}")
 
-total_time = time.time() - program_start_time
-logger.info(f"Training finished, total time = {timedelta(seconds=int(total_time))}")
+    return model_name, best_val, test_stats["mean"]
 
-if AUTO_PLOT:
-    logger.info("📈 Auto-plotting NSE CDF and Figure 5 outputs...")
-    from plot_nse_cdf import main as plot_main
 
-    plot_main()
+# ============================================================
+# 主入口：每个进程只训练一个模型
+# ============================================================
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", type=str, default=os.getenv("MODEL_NAME", "").strip(),
+                   help="Model name (e.g., LSTM, LSTM-GAT, LSTM-GCN, LSTM-Cheb, LSTM-GraphSAGE). "
+                        "If empty, will use MODEL_NAME env var; if still empty, will use MODEL_LIST[0].")
+    # 兼容你之前脚本的 NUM_GPUS / RUN_TAG / MEAN_LOSS_WEIGHT 均走 env，不在这里重复
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    model_name = args.model if args.model else MODEL_LIST[0]
+    if model_name not in MODEL_REGISTRY:
+        raise ValueError(f"Unknown model name: {model_name}. Available: {list(MODEL_REGISTRY.keys())}")
+
+    # 仅用于日志显示：外部通常用 CUDA_VISIBLE_DEVICES 绑定
+    visible = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    gpu_index = 0
+    if visible:
+        # 仅作标签展示，不影响实际 device 选择（我们始终用 cuda:0）
+        try:
+            gpu_index = int(visible.split(",")[0])
+        except Exception:
+            gpu_index = 0
+
+    logger.info(f"🚀 Single-process / single-model run: model={model_name} | CUDA_VISIBLE_DEVICES={visible} | NUM_WORKERS={NUM_WORKERS}")
+    result = train_single_model(model_name, device_id=0, gpu_index=gpu_index)
+
+    logger.info("\n===== Training Result =====")
+    logger.info(f"{result[0]}: best_val_MSE={result[1]:.4f}, test_NSE_mean={result[2]:.3f}")
+
+    total_time = time.time() - program_start_time
+    logger.info(f"Training finished, total time = {timedelta(seconds=int(total_time))}")
+
+    # 避免 5 个模型进程同时画图抢文件：只有你明确开启才画
+    ##if AUTO_PLOT and os.getenv("PLOT_AFTER_TRAIN", "0") == "1":
+    ##    logger.info("📈 Auto-plotting NSE CDF and Figure 5 outputs...")
+    ##    from plot_nse_cdf import main as plot_main
+    ##    plot_main()
+
+
+if __name__ == "__main__":
+    main()

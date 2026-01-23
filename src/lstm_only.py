@@ -82,6 +82,7 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
         lstm_dropout: float,
         gnn_dropout: float,     # used as fusion dropout
         cheb_k: int = 3,        # unused, kept for API compatibility
+        num_hops: int = 2,      # MODIFIED: accept HOP (ignored for LSTM-only)
     ):
         super().__init__()
 

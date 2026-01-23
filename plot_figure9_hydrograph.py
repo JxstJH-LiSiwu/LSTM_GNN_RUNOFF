@@ -100,6 +100,34 @@ def plot_hydrograph_comparison(
     plt.legend(frameon=False, fontsize=9)
 
 
+def find_peak_windows(series, *, peak_count=5, window=30, min_sep=30):
+    peaks = []
+    for i in range(1, len(series) - 1):
+        if not np.isfinite(series[i]):
+            continue
+        if series[i - 1] < series[i] >= series[i + 1]:
+            peaks.append(i)
+
+    if not peaks:
+        return []
+
+    peaks = sorted(peaks, key=lambda i: series[i], reverse=True)
+    selected = []
+    for idx in peaks:
+        if all(abs(idx - s) >= min_sep for s in selected):
+            selected.append(idx)
+        if len(selected) >= peak_count:
+            break
+
+    windows = []
+    for idx in sorted(selected):
+        start = max(0, idx - window)
+        end = min(len(series), idx + window + 1)
+        windows.append((start, end, idx))
+
+    return windows
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -109,7 +137,8 @@ def main():
     # --------------------------------------------------------
     # Paths
     # --------------------------------------------------------
-    SAVE_DIR   = Path("/home/lisiwu/jxwork/1-gnn-lstm/checkpoints")
+    base_dir = Path(__file__).resolve().parent
+    SAVE_DIR   = base_dir / "checkpoints"
     CACHE_FILE = SAVE_DIR / "data_cache" / "lamah_daily.pt"
 
     CKPT_LSTM     = SAVE_DIR / "lstm_only_model_epoch.pth"
@@ -126,6 +155,11 @@ def main():
     MIN_VALID = 30
 
     TARGET_STATIONS = ["ID_532", "ID_530", "ID_533"]
+    PEAK_REF_STATION = "ID_532"
+    PEAK_COUNT = 5
+    PEAK_WINDOW = 250
+    PEAK_MIN_SEP = 30
+    SAVE_DPI = 600
 
     # --------------------------------------------------------
     # Load data
@@ -229,31 +263,44 @@ def main():
     # --------------------------------------------------------
     # Plot Figure 9
     # --------------------------------------------------------
-    fig, axes = plt.subplots(
-        nrows=3, ncols=1, figsize=(10.5, 6.8), sharex=True
-    )
-
     time_idx = np.arange(obs_q.shape[0])
 
-    for ax, station_id in zip(axes, TARGET_STATIONS):
-        idx = basin_id_to_idx[station_id]
+    ref_idx = basin_id_to_idx[PEAK_REF_STATION]
+    peak_windows = find_peak_windows(
+        obs_q[:, ref_idx],
+        peak_count=PEAK_COUNT,
+        window=PEAK_WINDOW,
+        min_sep=PEAK_MIN_SEP,
+    )
 
-        plt.sca(ax)
-        plot_hydrograph_comparison(
-            time_idx,
-            obs_q[:, idx],
-            pred_lstm_q[:, idx],
-            pred_gat_q[:, idx],
-            nse_lstm[station_id],
-            nse_gat[station_id],
-            station_id,
+    if not peak_windows:
+        peak_windows = [(0, len(time_idx), None)]
+
+    for win_id, (start, end, peak_idx) in enumerate(peak_windows, start=1):
+        fig, axes = plt.subplots(
+            nrows=3, ncols=1, figsize=(10.5, 6.8), sharex=True
         )
 
-    axes[-1].set_xlabel("Time step")
+        for ax, station_id in zip(axes, TARGET_STATIONS):
+            idx = basin_id_to_idx[station_id]
 
-    plt.tight_layout()
-    plt.savefig(OUT_DIR / "figure9_hydrograph_lstm_vs_gat.png", dpi=300)
-    plt.show()
+            plt.sca(ax)
+            plot_hydrograph_comparison(
+                time_idx[start:end],
+                obs_q[start:end, idx],
+                pred_lstm_q[start:end, idx],
+                pred_gat_q[start:end, idx],
+                nse_lstm[station_id],
+                nse_gat[station_id],
+                station_id,
+            )
+
+        axes[-1].set_xlabel("Time step")
+        plt.tight_layout()
+
+        fname = f"figure9_hydrograph_lstm_vs_gat_peak_{win_id}.png"
+        plt.savefig(OUT_DIR / fname, dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
