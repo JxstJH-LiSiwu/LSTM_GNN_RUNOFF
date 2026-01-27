@@ -19,12 +19,14 @@ def predict_on_loader(model, dataloader, edge_index, edge_weight, device):
     with torch.no_grad():
         for batch in dataloader:
             dynamic = batch["dynamic"].to(device, non_blocking=True)
+            forecast = batch["forecast"].to(device, non_blocking=True)
             static = batch["static"].to(device, non_blocking=True)
             target = batch["target"]
             mask = batch["mask"]
 
             pred = model(
                 dynamic_features=dynamic,
+                forecast_features=forecast,
                 static_features=static,
                 edge_index=edge_index.to(device),
                 edge_weight=edge_weight.to(device),
@@ -93,6 +95,7 @@ def main():
     test_dataset = LamaHDataset(
         precip_df, temp_df, soil_df, runoff_df, static_df,
         seq_len=180,
+        lead_days=1,
         indices=split["test"],
         sample_weights=None,
     )
@@ -132,6 +135,7 @@ def main():
             model = cfg["class"](
                 dynamic_input_dim=3,
                 static_input_dim=static_df.shape[1],
+                forecast_input_dim=2,
                 lstm_hidden_dim=128,
                 gnn_hidden_dim=64,
                 output_dim=1,

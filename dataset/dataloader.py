@@ -13,6 +13,7 @@ def create_dataloader(
     """
     batch output shapes:
     dynamic: [B, N, seq_len, 3]
+    forecast:[B, N, 2]
     static:  [B, N, 58]
     target:  [B, N]
     mask:    [B, N]

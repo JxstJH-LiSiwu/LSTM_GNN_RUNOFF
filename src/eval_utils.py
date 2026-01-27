@@ -29,12 +29,14 @@ def predict_on_loader(
 
     for batch in dataloader:
         dynamic = batch["dynamic"].to(device)  # [B, seq_len, N, F]
+        forecast = batch["forecast"].to(device) # [B, N, F_fcst]
         static  = batch["static"].to(device)   # [B, N, D]  or [N, D]（你现在是 [B,N,D]）:contentReference[oaicite:2]{index=2}
         target  = batch["target"].to(device)   # [B, N]
         mask    = batch["mask"].to(device)     # [B, N] bool
 
         pred = model(
             dynamic_features=dynamic,
+            forecast_features=forecast,
             static_features=static,
             edge_index=edge_index,
             edge_weight=edge_weight,

@@ -112,6 +112,7 @@ def train_one_epoch(
 
     for step, batch in enumerate(dataloader, start=1):
         dynamic = batch["dynamic"].to(device, non_blocking=True)
+        forecast = batch["forecast"].to(device, non_blocking=True)
         static  = batch["static"].to(device, non_blocking=True)
         target  = batch["target"].to(device, non_blocking=True)  # (B, N)
         mask    = batch["mask"].to(device, non_blocking=True)    # bool (B, N)
@@ -137,6 +138,7 @@ def train_one_epoch(
         with autocast(device_type="cuda", enabled=amp_enabled):
             pred = model(
                 dynamic_features=dynamic,
+                forecast_features=forecast,
                 static_features=static,
                 edge_index=edge_index,
                 edge_weight=edge_weight,
@@ -170,6 +172,7 @@ def train_one_epoch(
         if do_detail:
             print(f"\n[DEBUG] ===== effective_batch={eff} (raw_step={step}) =====")
             print(_tensor_stats("dynamic", dynamic))
+            print(_tensor_stats("forecast", forecast))
             print(_tensor_stats("static", static))
             print(_tensor_stats("target", target))
             print(_tensor_stats("mask(float)", mask.float()))

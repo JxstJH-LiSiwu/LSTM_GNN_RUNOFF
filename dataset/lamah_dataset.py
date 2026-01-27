@@ -21,10 +21,12 @@ class LamaHDataset(Dataset):
         runoff_df,
         static_df,
         seq_len,
+        lead_days=1,
         indices=None,
         sample_weights=None,
     ):
         self.seq_len = seq_len
+        self.lead_days = int(lead_days)
         self.sample_weights = sample_weights
 
         self.basin_ids = list(static_df.index)
@@ -39,10 +41,14 @@ class LamaHDataset(Dataset):
         self.static = static_df.values.astype(np.float32)
         self.T = self.precip.shape[0]
 
+        max_lead = max(1, self.lead_days)
         if indices is None:
-            self.valid_t = list(range(seq_len, self.T - 1))
+            self.valid_t = list(range(seq_len, self.T - max_lead))
         else:
-            self.valid_t = list(indices)
+            self.valid_t = [
+                int(t) for t in indices
+                if (t >= seq_len) and (t + max_lead < self.T)
+            ]
 
     def __len__(self):
         return len(self.valid_t)
@@ -59,7 +65,16 @@ class LamaHDataset(Dataset):
             axis=-1,
         )  # (seq_len, N, 3)
 
-        y = self.runoff[t + 1]  # (N,) already transformed
+        lead = self.lead_days
+        x_fcst = np.stack(
+            [
+                self.precip[t + lead],
+                self.temp[t + lead],
+            ],
+            axis=-1,
+        )  # (N, 2) forecast features at target day
+
+        y = self.runoff[t + lead]  # (N,) already transformed
         mask = np.isfinite(y) # validity mask
 
         weight = (
@@ -70,6 +85,7 @@ class LamaHDataset(Dataset):
 
         return {
             "dynamic": torch.from_numpy(x_dyn),
+            "forecast": torch.from_numpy(x_fcst),
             "static":  torch.from_numpy(self.static),
             "target":  torch.from_numpy(y),              # transformed target
             "mask":    torch.from_numpy(mask),

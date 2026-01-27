@@ -36,45 +36,50 @@ INIT_FROM_RAW = False
 # NOTE: 不再在 train.py 内部做多 GPU 调度；外部用 CUDA_VISIBLE_DEVICES 控制
 NUM_GPUS = int(os.getenv("NUM_GPUS", "1"))  # 保留兼容，但不再用于 Pool
 
-TRAIN_MODE = 0
-RESUME_EPOCH = 0
-MAX_EPOCH = 65
-MODEL_LIST = ["LSTM", "LSTM-GAT", "LSTM-GCN", "LSTM-Cheb", "LSTM-GraphSAGE"]
+# -------------------- Training control --------------------
+TRAIN_MODE = 0        # default: 0 -> train from scratch; 1 -> resume from checkpoint
+RESUME_EPOCH = 0      # default: 0 -> resume starting epoch index (used when TRAIN_MODE=1)
+MAX_EPOCH = 65        # default: 65 -> total training epochs
+MODEL_LIST = ["LSTM", "LSTM-GAT", "LSTM-GCN", "LSTM-Cheb", "LSTM-GraphSAGE"]  # default list
 
 # FOR PAPER
-LSTM_HIDDEN_DIM = 128
-LSTM_LAYERS = 2
-GNN_HIDDEN_DIM = 64
-GAT_HEADS = 4
-LSTM_DROPOUT = 0.35
-GNN_DROPOUT = 0.2
-OUTPUT_DIM = 1
-CHEBK = 3  # defult = 3 if use LSTM_CheNet
-NUM_HOPS = int(os.getenv("HOP", "2"))  # MODIFIED: multi-hop routing with residual + layernorm
+# -------------------- Model hyperparameters --------------------
+LSTM_HIDDEN_DIM = 128  # default: 128 -> LSTM hidden size (d_lstm)
+LSTM_LAYERS = 2        # default: 2 -> number of LSTM layers
+GNN_HIDDEN_DIM = 64    # default: 64 -> GNN hidden size
+GAT_HEADS = 4          # default: 4 -> GAT attention heads
+LSTM_DROPOUT = 0.35    # default: 0.35 -> LSTM dropout (applied between layers)
+GNN_DROPOUT = 0.2      # default: 0.2 -> fusion + GNN dropout
+OUTPUT_DIM = 1         # default: 1 -> per-node scalar prediction
+CHEBK = 3              # default: 3 -> ChebNet K (only for LSTM-Cheb)
+NUM_HOPS = int(os.getenv("HOP", "2"))  # default: 2 -> multi-hop routing depth (env: HOP)
 
-USE_AMP = True
+# -------------------- Optimization hyperparameters --------------------
+USE_AMP = True         # default: True -> use mixed precision on CUDA
+BASE_BATCH_SIZE = 12   # default: 12 -> per-step batch size
+ACCUM_STEPS = 2        # default: 2 -> gradient accumulation steps
+LEARNING_RATE = 5e-4   # default: 5e-4 -> Adam lr
+MIN_LR = 1e-5          # default: 1e-5 -> scheduler min lr
+LR_PATIENCE = 3        # default: 3 -> ReduceLROnPlateau patience
 
-BASE_BATCH_SIZE = 12
-ACCUM_STEPS = 2
-
-LEARNING_RATE = 5e-4
-MIN_LR = 1e-5
-LR_PATIENCE = 3
-
-SEQ_LEN = 180
-TRAIN_RATIO = 0.7
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
-SPLIT_SEED = 42
+# -------------------- Data/forecast hyperparameters --------------------
+SEQ_LEN = 180          # default: 180 -> lookback days
+FORECAST_INPUT_DIM = 2 # default: 2 -> forecast features (precip + temp)
+LEAD_DAYS = int(os.getenv("LEAD_DAYS", "1"))  # default: 1 -> forecast horizon in days (env: LEAD_DAYS)
+TRAIN_RATIO = 0.7      # default: 0.7 -> train split ratio
+VAL_RATIO = 0.15       # default: 0.15 -> validation split ratio
+TEST_RATIO = 0.15      # default: 0.15 -> test split ratio
+SPLIT_SEED = 42        # default: 42 -> split random seed
 
 AUTO_PLOT = False  # 仍保留，但默认不在每个模型进程里画（见 PLOT_AFTER_TRAIN）
 
-PEAK_WEIGHTING = True
-PEAK_TOP_PCT = 0.025
-PEAK_WEIGHT = 4.0
+# -------------------- Loss shaping hyperparameters --------------------
+PEAK_WEIGHTING = True  # default: True -> apply peak weighting
+PEAK_TOP_PCT = 0.025   # default: 0.025 -> top percentile for peak emphasis
+PEAK_WEIGHT = 4.0      # default: 4.0 -> weight multiplier for peaks
 
 RAW_EDGE_MODELS = {"LSTM-GAT", "LSTM-GCN", "LSTM-Cheb"}
-MEAN_LOSS_WEIGHT = float(os.getenv("MEAN_LOSS_WEIGHT", "0.0"))
+MEAN_LOSS_WEIGHT = float(os.getenv("MEAN_LOSS_WEIGHT", "0.0"))  # default: 0.0 -> mean penalty weight (env)
 RUN_TAG = os.getenv("RUN_TAG", "").strip()
 
 # DataLoader workers：单进程下可安全开多 worker（40 核机器建议每进程 6~10）
@@ -222,6 +227,7 @@ def evaluate(model, dataloader, edge_index, edge_weight, device, basin_ids, runo
     # Pass 2: forward + accumulate
     for batch in dataloader:
         dynamic = batch["dynamic"].to(device, non_blocking=True)
+        forecast = batch["forecast"].to(device, non_blocking=True)
         static = batch["static"].to(device, non_blocking=True)
         target = batch["target"].numpy()  # transformed
         mask = batch["mask"].numpy()
@@ -230,6 +236,7 @@ def evaluate(model, dataloader, edge_index, edge_weight, device, basin_ids, runo
             with torch.amp.autocast("cuda", enabled=bool(device.type == "cuda")):
                 pred = model(
                     dynamic_features=dynamic,
+                    forecast_features=forecast,
                     static_features=static,
                     edge_index=edge_index,
                     edge_weight=edge_weight,
@@ -268,7 +275,7 @@ def evaluate(model, dataloader, edge_index, edge_weight, device, basin_ids, runo
             nse_num[bid] += ((o - p) ** 2).sum()
             nse_den[bid] += ((o - mu) ** 2).sum()
 
-        del dynamic, static, pred
+        del dynamic, forecast, static, pred
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -378,6 +385,7 @@ def train_single_model(model_name, device_id=0, gpu_index=0):
     model = cfg["class"](
         dynamic_input_dim=3,
         static_input_dim=static_df.shape[1],
+        forecast_input_dim=FORECAST_INPUT_DIM,
         lstm_hidden_dim=LSTM_HIDDEN_DIM,
         gnn_hidden_dim=GNN_HIDDEN_DIM,
         output_dim=OUTPUT_DIM,
@@ -407,18 +415,21 @@ def train_single_model(model_name, device_id=0, gpu_index=0):
     train_dataset = LamaHDataset(
         precip_df, temp_df, soil_df, runoff_df, static_df,
         seq_len=SEQ_LEN,
+        lead_days=LEAD_DAYS,
         indices=train_indices,
         sample_weights=None,
     )
     val_dataset = LamaHDataset(
         precip_df, temp_df, soil_df, runoff_df, static_df,
         seq_len=SEQ_LEN,
+        lead_days=LEAD_DAYS,
         indices=val_indices,
         sample_weights=None,
     )
     test_dataset = LamaHDataset(
         precip_df, temp_df, soil_df, runoff_df, static_df,
         seq_len=SEQ_LEN,
+        lead_days=LEAD_DAYS,
         indices=test_indices,
         sample_weights=None,
     )
@@ -530,6 +541,8 @@ def parse_args():
     p.add_argument("--model", type=str, default=os.getenv("MODEL_NAME", "").strip(),
                    help="Model name (e.g., LSTM, LSTM-GAT, LSTM-GCN, LSTM-Cheb, LSTM-GraphSAGE). "
                         "If empty, will use MODEL_NAME env var; if still empty, will use MODEL_LIST[0].")
+    p.add_argument("--lead-days", type=int, default=LEAD_DAYS,
+                   help="Forecast horizon in days (1-7). Overrides LEAD_DAYS env var.")
     # 兼容你之前脚本的 NUM_GPUS / RUN_TAG / MEAN_LOSS_WEIGHT 均走 env，不在这里重复
     return p.parse_args()
 
@@ -538,6 +551,10 @@ def main():
     args = parse_args()
 
     model_name = args.model if args.model else MODEL_LIST[0]
+    global LEAD_DAYS
+    LEAD_DAYS = int(args.lead_days)
+    if not (1 <= LEAD_DAYS <= 7):
+        raise ValueError(f"--lead-days must be in [1,7], got {LEAD_DAYS}")
     if model_name not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model name: {model_name}. Available: {list(MODEL_REGISTRY.keys())}")
 

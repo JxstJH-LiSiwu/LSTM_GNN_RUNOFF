@@ -39,17 +39,37 @@ class StaticEncoder(nn.Module):
 
 
 # ============================================================
+# Forecast Encoder - tomorrow's meteorological features
+# ============================================================
+
+class ForecastEncoder(nn.Module):
+    def __init__(self, forecast_input_dim: int, out_dim: int):
+        super().__init__()
+        self.fc = nn.Linear(forecast_input_dim, out_dim)
+
+    def forward(self, f: torch.Tensor) -> torch.Tensor:
+        return F.relu(self.fc(f))
+
+
+# ============================================================
 # Fusion
 # ============================================================
 
 class FusionLayer(nn.Module):
-    def __init__(self, d_lstm: int, dropout: float):
+    def __init__(self, d_lstm: int, dropout: float, *, use_forecast: bool = False):
         super().__init__()
-        self.proj = nn.Linear(d_lstm * 2, d_lstm)
+        self.use_forecast = use_forecast
+        in_dim = d_lstm * (3 if use_forecast else 2)
+        self.proj = nn.Linear(in_dim, d_lstm)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, z_dyn: torch.Tensor, s_tilde: torch.Tensor) -> torch.Tensor:
-        h = torch.cat([z_dyn, s_tilde], dim=-1)
+    def forward(self, z_dyn: torch.Tensor, s_tilde: torch.Tensor, f_tilde: torch.Tensor = None) -> torch.Tensor:
+        if self.use_forecast:
+            if f_tilde is None:
+                raise ValueError("forecast features required but missing")
+            h = torch.cat([z_dyn, s_tilde, f_tilde], dim=-1)
+        else:
+            h = torch.cat([z_dyn, s_tilde], dim=-1)
         h = F.relu(self.proj(h))
         return self.drop(h)
 
@@ -97,6 +117,7 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
         self,
         dynamic_input_dim: int,
         static_input_dim: int,
+        forecast_input_dim: int,
         lstm_hidden_dim: int,
         gnn_hidden_dim: int,
         output_dim: int,
@@ -111,7 +132,14 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
 
         self.lstm_encoder = LSTMEncoder(dynamic_input_dim, lstm_hidden_dim, lstm_layers, lstm_dropout)
         self.static_encoder = StaticEncoder(static_input_dim, lstm_hidden_dim)
-        self.fusion = FusionLayer(lstm_hidden_dim, gnn_dropout)
+        self.forecast_encoder = None
+        if forecast_input_dim > 0:
+            self.forecast_encoder = ForecastEncoder(
+                forecast_input_dim=forecast_input_dim,
+                out_dim=lstm_hidden_dim,
+            )
+
+        self.fusion = FusionLayer(lstm_hidden_dim, gnn_dropout, use_forecast=self.forecast_encoder is not None)
 
         self.gnn = GCNRouting2Hop(
             lstm_hidden_dim,
@@ -124,6 +152,7 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
     def forward(
         self,
         dynamic_features: torch.Tensor,  # (B, T, N, F_dyn)
+        forecast_features: torch.Tensor, # (B, N, F_fcst)
         static_features: torch.Tensor,   # (B, N, F_static)
         edge_index: torch.Tensor,        # (2, E)
         edge_weight: torch.Tensor = None # (E,)
@@ -132,10 +161,16 @@ class CombinedLSTMWithStatic2Hop(nn.Module):
 
         dyn = dynamic_features.permute(0, 2, 1, 3).reshape(B * N, T, F_dyn)
         sta = static_features.reshape(B * N, -1)
+        fcst = None
+        if self.forecast_encoder is not None:
+            if forecast_features is None:
+                raise ValueError("forecast_features is required when forecast_input_dim > 0")
+            fcst = forecast_features.reshape(B * N, -1)
 
         z_dyn = self.lstm_encoder(dyn)         # (B*N, d_lstm)
         s_tilde = self.static_encoder(sta)     # (B*N, d_lstm)
-        node_embed = self.fusion(z_dyn, s_tilde)
+        f_tilde = self.forecast_encoder(fcst) if self.forecast_encoder is not None else None
+        node_embed = self.fusion(z_dyn, s_tilde, f_tilde)
 
         device = node_embed.device
         edge_index_big = []
