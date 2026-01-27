@@ -33,7 +33,6 @@ CACHE_DIR = SAVE_DIR / "data_cache"
 CACHE_FILE = CACHE_DIR / "lamah_daily.pt"
 INIT_FROM_RAW = False
 
-# NOTE: 不再在 train.py 内部做多 GPU 调度；外部用 CUDA_VISIBLE_DEVICES 控制
 NUM_GPUS = int(os.getenv("NUM_GPUS", "1"))  # 保留兼容，但不再用于 Pool
 
 # -------------------- Training control --------------------
@@ -48,7 +47,7 @@ LSTM_HIDDEN_DIM = 128  # default: 128 -> LSTM hidden size (d_lstm)
 LSTM_LAYERS = 2        # default: 2 -> number of LSTM layers
 GNN_HIDDEN_DIM = 64    # default: 64 -> GNN hidden size
 GAT_HEADS = 4          # default: 4 -> GAT attention heads
-LSTM_DROPOUT = 0.35    # default: 0.35 -> LSTM dropout (applied between layers)
+LSTM_DROPOUT = 0.2    # default: 0.2 -> LSTM dropout (applied between layers)
 GNN_DROPOUT = 0.2      # default: 0.2 -> fusion + GNN dropout
 OUTPUT_DIM = 1         # default: 1 -> per-node scalar prediction
 CHEBK = 3              # default: 3 -> ChebNet K (only for LSTM-Cheb)
