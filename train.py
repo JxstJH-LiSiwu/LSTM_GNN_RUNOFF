@@ -1,6 +1,7 @@
 # train.py
 from pathlib import Path
 import logging
+import json  # MODIFIED: save hparams sidecar for inference
 import os
 import time
 from datetime import datetime, timedelta
@@ -396,6 +397,21 @@ def train_single_model(model_name, device_id=0, gpu_index=0):
         num_hops=NUM_HOPS,  # MODIFIED: multi-hop routing with residual + layernorm
     ).to(device)
 
+    hparams = {  # MODIFIED: save model init hyperparameters
+        "dynamic_input_dim": 3,
+        "static_input_dim": int(static_df.shape[1]),
+        "forecast_input_dim": int(FORECAST_INPUT_DIM),
+        "lstm_hidden_dim": int(LSTM_HIDDEN_DIM),
+        "gnn_hidden_dim": int(GNN_HIDDEN_DIM),
+        "output_dim": int(OUTPUT_DIM),
+        "lstm_layers": int(LSTM_LAYERS),
+        "gat_heads": int(GAT_HEADS),
+        "lstm_dropout": float(LSTM_DROPOUT),
+        "gnn_dropout": float(GNN_DROPOUT),
+        "cheb_k": int(CHEBK),
+        "num_hops": int(NUM_HOPS),
+    }
+
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=LR_PATIENCE, min_lr=MIN_LR,
@@ -499,6 +515,8 @@ def train_single_model(model_name, device_id=0, gpu_index=0):
         if val_mse < best_val:
             best_val = val_mse
             torch.save(model.state_dict(), ckpt_path)
+            with open(ckpt_path.with_suffix(".json"), "w", encoding="utf-8") as f:  # MODIFIED
+                json.dump(hparams, f, indent=2)  # MODIFIED
             model_logger.info(f"[BEST] val_MSE(Q)={best_val:.4f} -> saved {ckpt_path.name}")
 
     # 测试阶段
@@ -541,7 +559,7 @@ def parse_args():
                    help="Model name (e.g., LSTM, LSTM-GAT, LSTM-GCN, LSTM-Cheb, LSTM-GraphSAGE). "
                         "If empty, will use MODEL_NAME env var; if still empty, will use MODEL_LIST[0].")
     p.add_argument("--lead-days", type=int, default=LEAD_DAYS,
-                   help="Forecast horizon in days (1-7). Overrides LEAD_DAYS env var.")
+                   help="Forecast horizon in days (0-7). 0 disables forecast input but still predicts t+1.")
     # 兼容你之前脚本的 NUM_GPUS / RUN_TAG / MEAN_LOSS_WEIGHT 均走 env，不在这里重复
     return p.parse_args()
 
@@ -552,8 +570,12 @@ def main():
     model_name = args.model if args.model else MODEL_LIST[0]
     global LEAD_DAYS
     LEAD_DAYS = int(args.lead_days)
-    if not (1 <= LEAD_DAYS <= 7):
-        raise ValueError(f"--lead-days must be in [1,7], got {LEAD_DAYS}")
+    if not (0 <= LEAD_DAYS <= 7):
+        raise ValueError(f"--lead-days must be in [0,7], got {LEAD_DAYS}")
+    if LEAD_DAYS == 0:
+        global FORECAST_INPUT_DIM
+        FORECAST_INPUT_DIM = 0  # MODIFIED: no-forecast input
+        LEAD_DAYS = 1  # MODIFIED: keep split/target alignment (still predict t+1)
     if model_name not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model name: {model_name}. Available: {list(MODEL_REGISTRY.keys())}")
 
