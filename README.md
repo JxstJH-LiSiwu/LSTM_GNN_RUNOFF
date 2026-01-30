@@ -79,6 +79,9 @@ dataset/
 ├── plot_nse_cdf.py             # NSE-CDF plotting
 ├── plot_figure6.py             # paper-style figure
 ├── plot_figure9_hydrograph.py  # hydrograph plotting
+├── infer_cache.py              # offline inference cache (.pt)
+├── analyze_forecast_impact.py  # forecast vs no-forecast analysis
+├── select_hydrograph_stations.py # auto-select A,B->C triplets for hydrograph
 ├── eval_mlw_metrics.py         # evaluation across checkpoints
 └── analyze_bad_nse_basins.py   # diagnostic analysis
 ```
@@ -116,6 +119,11 @@ or via environment variable:
 MODEL_NAME=LSTM-GCN python train.py
 ```
 
+2b) **No-forecast training (still predicts t+1)**
+```bash
+python train.py --model LSTM --lead-days 0
+```
+
 3) **Control routing hops (optional)**
 ```bash
 HOP=3 python train.py --model LSTM-Cheb
@@ -141,6 +149,43 @@ NSE is defined as:
 Generate NSE-CDF plot:
 ```bash
 python plot_nse_cdf.py
+```
+
+## Offline Inference Cache (for fast plotting)
+Generate cached predictions to avoid re-running inference inside plotting scripts:
+```bash
+python infer_cache.py --models LSTM,LSTM-GAT --lead_days 1 --num_hops 3
+```
+Outputs are saved to `checkpoints/infer_cache/` with names like:
+```
+LSTM_lead1_hop3.pt
+LSTM-GAT_lead1_hop3.pt
+```
+
+## Forecast vs No-Forecast Analysis
+Analyze and visualize the impact of forecast inputs (lead=1 by default):
+```bash
+python analyze_forecast_impact.py \
+  --infer_dir checkpoints/infer_cache \
+  --out_dir checkpoints/infer_cache/analysis_forecast
+```
+This produces:
+- NSE CDFs (forecast vs no-forecast)
+- delta histograms/scatter plots
+- summary CSV
+
+## Auto-select Hydrograph Stations (A,B -> C)
+Select triplets where two upstream stations drain into a downstream station C:
+```bash
+python select_hydrograph_stations.py --lead 1 --hop 3
+```
+Then plot hydrographs using cached `.pt`:
+```bash
+python plot_figure9_hydrograph.py \
+  --triplet_file checkpoints/infer_cache/selected_triplets_lead1_hop3.txt \
+  --infer_dir checkpoints/infer_cache \
+  --lead 1 --hop 3 \
+  --compare_noforecast
 ```
 
 ## Reproducibility Notes

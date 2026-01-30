@@ -141,7 +141,7 @@ def main():
                 output_dim=1,
                 lstm_layers=2,
                 gat_heads=4,
-                lstm_dropout=0.35,
+                lstm_dropout=0.2,
                 gnn_dropout=0.2,
                 cheb_k=3,
             ).to(device)
